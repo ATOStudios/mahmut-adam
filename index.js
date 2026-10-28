@@ -386,24 +386,27 @@ async function connectToVoice() {
 
         connection.subscribe(audioPlayer);
 
-        // Bağlantının tamamen hazır olmasını bekle
-        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-        console.log('[Ses] Ses kanalına bağlanıldı! Discord ses akışı başlatılıyor...');
-
-        // DİKKAT: Discord voice sunucularının bota gelen ses paketlerini iletmesi için
-        // botun kanala ilk ses paketini göndermesi (bağlantıyı uyandırması) şarttır!
-        setTimeout(async () => {
-            await speak('Selam beyler, Mahmut geldi! Beni çağırmak için Mahmut demeniz yeterli.');
-        }, 1000);
+        // Bağlantı hazır olduğunda selam ver ve dinlemeyi aktif et
+        let isFirstReady = true;
+        connection.on(VoiceConnectionStatus.Ready, async () => {
+            console.log('[Ses] Ses kanalına başarıyla bağlanıldı! Discord ses akışı aktif.');
+            if (isFirstReady) {
+                isFirstReady = false;
+                setTimeout(async () => {
+                    await speak('Selam beyler, Mahmut geldi! Beni çağırmak için Mahmut demeniz yeterli.');
+                }, 1000);
+            }
+        });
 
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
+            console.log('[Ses] Bağlantı koptu veya sunucu değişti, yeniden deneniyor...');
             try {
                 await Promise.race([
                     entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
                     entersState(connection, VoiceConnectionStatus.Connecting, 5_000)
                 ]);
             } catch (error) {
-                console.log('[Ses] Bağlantı koptu, yeniden bağlanılıyor...');
+                console.log('[Ses] Yeniden bağlanılamadı, 5 saniye sonra sıfırdan bağlanılacak...');
                 try {
                     connection.destroy();
                 } catch (e) {}
@@ -515,7 +518,9 @@ async function connectToVoice() {
         });
 
     } catch (err) {
-        console.error('[HATA] Ses kanalına bağlanırken hata:', err);
+        console.error('[HATA] Ses kanalına bağlanırken hata:', err.message);
+        console.log('[Ses] 5 saniye sonra tekrar bağlanmayı deneyecek...');
+        setTimeout(connectToVoice, 5000);
     }
 }
 

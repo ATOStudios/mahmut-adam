@@ -311,9 +311,15 @@ async function connectToVoice() {
 
         connection.subscribe(audioPlayer);
 
-        connection.on(VoiceConnectionStatus.Ready, () => {
-            console.log('[Ses] Ses kanalına bağlanıldı! Mahmut dinlemede.');
-        });
+        // Bağlantının tamamen hazır olmasını bekle
+        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+        console.log('[Ses] Ses kanalına bağlanıldı! Discord ses akışı başlatılıyor...');
+
+        // DİKKAT: Discord voice sunucularının bota gelen ses paketlerini iletmesi için
+        // botun kanala ilk ses paketini göndermesi (bağlantıyı uyandırması) şarttır!
+        setTimeout(async () => {
+            await speak('Selam beyler, Mahmut geldi! Beni çağırmak için Mahmut demeniz yeterli.');
+        }, 1000);
 
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
             try {
@@ -337,12 +343,16 @@ async function connectToVoice() {
             if (isBotSpeaking) return; // Mahmut konuşurken dinleme
             if (activeUsers.has(userId)) return;
 
+            const member = guild.members.cache.get(userId);
+            const speakerName = member?.displayName || member?.user?.username || 'Biri';
+            console.log(`[Mikrofon Algılandı] ${speakerName} (${userId}) konuşmaya başladı...`);
+
             activeUsers.add(userId);
 
             const opusStream = receiver.subscribe(userId, {
                 end: {
                     behavior: EndBehaviorType.AfterSilence,
-                    duration: 800 // 800ms sessizlik olunca cümlenin bittiğini anlar
+                    duration: 700 // 700ms sessizlik olunca konuşmanın bittiğini anlar
                 }
             });
 
@@ -364,28 +374,40 @@ async function connectToVoice() {
                 if (isBotSpeaking) return;
 
                 const pcmBuffer = Buffer.concat(pcmChunks);
-                // 0.5 saniyeden kısa arka plan seslerini/tıklamaları atla
-                // 48000Hz * 2 kanal * 2 bayt * 0.5s = 96000 bayt
-                if (pcmBuffer.length < 96000) return;
+                // Çok kısa tık seslerini (0.15 saniyeden kısa) filtrele
+                // 48000Hz * 2 kanal * 2 bayt * 0.15s = 28800 bayt
+                if (pcmBuffer.length < 28800) {
+                    console.log(`[Ses Çok Kısa] ${speakerName} konuşması atlandı (Boyut: ${pcmBuffer.length} bayt)`);
+                    return;
+                }
 
-                const member = guild.members.cache.get(userId);
-                const speakerName = member?.displayName || member?.user?.username || 'Kanka';
+                console.log(`[Ses İletiliyor] ${speakerName} sesi Gemini'a gönderiliyor (${(pcmBuffer.length / 192000).toFixed(2)} sn)...`);
 
                 const wavBuffer = pcmToWav(pcmBuffer);
                 const transcript = await transcribeAudio(wavBuffer);
 
-                if (!transcript || transcript === 'BOS') return;
+                console.log(`[Transkript Sonucu] ${speakerName}: "${transcript}"`);
+
+                if (!transcript || transcript === 'BOS') {
+                    console.log('[Transkript Boş] Ses çözülemedi veya arka plan gürültüsü.');
+                    return;
+                }
 
                 const lowerText = transcript.toLowerCase();
 
-                // "Mahmut" dendi mi kontrol et
-                if (lowerText.includes('mahmut')) {
-                    console.log(`[Ses Algılandı] ${speakerName}: "${transcript}"`);
+                // "Mahmut", "Mamut", "Mahmud" dendi mi kontrol et
+                const isMahmutMentioned =
+                    lowerText.includes('mahmut') ||
+                    lowerText.includes('mamut') ||
+                    lowerText.includes('mahmud');
+
+                if (isMahmutMentioned) {
+                    console.log(`[Mahmut Tetiklendi!] ${speakerName}: "${transcript}"`);
 
                     // 1. Sadece "Mahmut" veya "Mahmut orada mısın?" dendiyse
                     const isOnlyGreeting =
-                        /^(hey\s+)?mahmut[\s?.!]*$/i.test(transcript.trim()) ||
-                        /^(mahmut\s+)?(orda\s+mısın|burada\s+mısın|baksana)[\s?.!]*$/i.test(transcript.trim());
+                        /^(hey\s+)?(mahmut|mamut|mahmud)[\s?.!]*$/i.test(transcript.trim()) ||
+                        /^((mahmut|mamut|mahmud)\s+)?(orda\s+mısın|burada\s+mısın|baksana)[\s?.!]*$/i.test(transcript.trim());
 
                     if (isOnlyGreeting) {
                         await speak(`Efendim ${speakerName}, dinliyorum kanka?`);
@@ -402,10 +424,13 @@ async function connectToVoice() {
                             await speak(result.voiceText);
                         }
                     }
+                } else {
+                    console.log(`[Normal Konuşma] Mahmut'a seslenilmedi, yoksayıldı.`);
                 }
             });
 
-            opusDecoder.on('error', () => {
+            opusDecoder.on('error', (err) => {
+                console.error('[Opus Decoder Hatası]:', err.message);
                 activeUsers.delete(userId);
             });
         });

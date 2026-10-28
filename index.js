@@ -18,10 +18,17 @@ const {
 const prism = require('prism-media');
 const googleTTS = require('google-tts-api');
 const ffmpegPath = require('ffmpeg-static');
+const { ElevenLabsClient } = require('@elevenlabs/elevenlabs-js');
+require('dotenv').config({ path: '.env.local' });
 require('dotenv').config();
 
 // FFMPEG yolunu ortam değişkenine bağla
 process.env.FFMPEG_PATH = ffmpegPath;
+
+// ElevenLabs İstemcisi
+const elevenLabs = process.env.ELEVENLABS_API_KEY
+    ? new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY })
+    : null;
 
 // -------------------------------------------------------------
 // 1. RENDER İÇİN HTTP SUNUCUSU (Uptime & Port)
@@ -237,27 +244,70 @@ async function speak(text) {
         isBotSpeaking = true;
         console.log(`[Mahmut Konuşuyor]: "${text}"`);
 
-        // Metin uzunsa parçalayarak al
-        const audioList = await googleTTS.getAllAudioBase64(text, {
-            lang: 'tr',
-            slow: false,
-            timeout: 10000
-        });
+        let played = false;
 
-        for (const item of audioList) {
-            const buffer = Buffer.from(item.base64, 'base64');
-            const stream = Readable.from(buffer);
-            const resource = createAudioResource(stream);
+        // 1. Önce ElevenLabs Gerçek İnsan Sesi Denenir
+        if (elevenLabs && process.env.ELEVENLABS_API_KEY) {
+            try {
+                console.log('[TTS] ElevenLabs insan sesiyle seslendiriliyor...');
+                // Roger (CwhRBWXzGAHq8TQ4Fs17) - Doğal, samimi erkek sesi
+                const audioStream = await elevenLabs.textToSpeech.convert('CwhRBWXzGAHq8TQ4Fs17', {
+                    text: text,
+                    model_id: 'eleven_multilingual_v2',
+                    voice_settings: {
+                        stability: 0.5,
+                        similarity_boost: 0.8
+                    }
+                });
 
-            audioPlayer.play(resource);
+                const chunks = [];
+                for await (const chunk of audioStream) {
+                    chunks.push(chunk);
+                }
+                const audioBuffer = Buffer.concat(chunks);
+                const stream = Readable.from(audioBuffer);
+                const resource = createAudioResource(stream);
 
-            await new Promise((resolve) => {
-                const onIdle = () => {
-                    audioPlayer.off(AudioPlayerStatus.Idle, onIdle);
-                    resolve();
-                };
-                audioPlayer.on(AudioPlayerStatus.Idle, onIdle);
+                audioPlayer.play(resource);
+
+                await new Promise((resolve) => {
+                    const onIdle = () => {
+                        audioPlayer.off(AudioPlayerStatus.Idle, onIdle);
+                        resolve();
+                    };
+                    audioPlayer.on(AudioPlayerStatus.Idle, onIdle);
+                });
+
+                played = true;
+            } catch (elErr) {
+                console.warn('[ElevenLabs Hatası/Kota]:', elErr.message, 'Yedek TTS motoruna geçiliyor...');
+            }
+        }
+
+        // 2. Yedek Ses Motoru (Google TTS)
+        if (!played) {
+            console.log('[TTS] Yedek ses motoru kullanılıyor...');
+            const audioList = await googleTTS.getAllAudioBase64(text, {
+                lang: 'tr',
+                slow: false,
+                timeout: 10000
             });
+
+            for (const item of audioList) {
+                const buffer = Buffer.from(item.base64, 'base64');
+                const stream = Readable.from(buffer);
+                const resource = createAudioResource(stream);
+
+                audioPlayer.play(resource);
+
+                await new Promise((resolve) => {
+                    const onIdle = () => {
+                        audioPlayer.off(AudioPlayerStatus.Idle, onIdle);
+                        resolve();
+                    };
+                    audioPlayer.on(AudioPlayerStatus.Idle, onIdle);
+                });
+            }
         }
     } catch (err) {
         console.error('[TTS Hatası]:', err);

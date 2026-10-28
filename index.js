@@ -87,42 +87,54 @@ function pcmToWav(pcmData, sampleRate = 48000, numChannels = 2, bitsPerSample = 
 // 3. GEMINI API ÇAĞRILARI (STT, Canlı Arama, Görsel Analiz)
 // -------------------------------------------------------------
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3.8-flash'];
 
-function callGeminiAPI(bodyObj) {
-    return new Promise((resolve, reject) => {
-        if (!GEMINI_KEY) return reject(new Error('GEMINI_API_KEY eksik!'));
-        const body = JSON.stringify(bodyObj);
+async function callGeminiAPI(bodyObj) {
+    if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY eksik!');
+    const body = JSON.stringify(bodyObj);
 
-        const req = https.request(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body)
-                }
-            },
-            (res) => {
-                let data = '';
-                res.on('data', (c) => (data += c));
-                res.on('end', () => {
-                    try {
-                        const json = JSON.parse(data);
-                        if (json.candidates && json.candidates[0]?.content?.parts[0]?.text) {
-                            resolve(json.candidates[0].content.parts[0].text);
-                        } else {
-                            resolve(null);
+    for (const model of GEMINI_MODELS) {
+        try {
+            const text = await new Promise((resolve, reject) => {
+                const req = https.request(
+                    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Content-Length': Buffer.byteLength(body)
                         }
-                    } catch (err) {
-                        reject(err);
+                    },
+                    (res) => {
+                        let data = '';
+                        res.on('data', (c) => (data += c));
+                        res.on('end', () => {
+                            try {
+                                const json = JSON.parse(data);
+                                if (json.candidates && json.candidates[0]?.content?.parts[0]?.text) {
+                                    resolve(json.candidates[0].content.parts[0].text);
+                                } else if (json.error) {
+                                    reject(new Error(`[${model}] ${json.error.code}: ${json.error.message}`));
+                                } else {
+                                    resolve(null);
+                                }
+                            } catch (err) {
+                                reject(err);
+                            }
+                        });
                     }
-                });
-            }
-        );
-        req.on('error', reject);
-        req.write(body);
-        req.end();
-    });
+                );
+                req.on('error', reject);
+                req.write(body);
+                req.end();
+            });
+
+            if (text) return text;
+        } catch (err) {
+            console.warn(`[Gemini Denemesi Başarısız]: ${err.message}`);
+        }
+    }
+    return null;
 }
 
 // Sesi Metne Dökme (STT)
@@ -134,7 +146,7 @@ async function transcribeAudio(wavBuffer) {
                 {
                     parts: [
                         {
-                            text: 'Aşağıdaki ses kaydında Türkçe ne söyleniyor? Sadece ve sadece konuşulan cümleyi tam olarak yaz. Eğer ses anlaşılmıyorsa, sadece nefes, öksürük veya arka plan gürültüsüyse sadece "BOS" yaz.'
+                            text: 'Bu Türkçe ses kaydında ne söyleniyor? Duyduğun kelimeleri aynen yaz. Konuşma yoksa sadece BOŞ yaz.'
                         },
                         {
                             inline_data: {
@@ -146,23 +158,23 @@ async function transcribeAudio(wavBuffer) {
                 }
             ]
         });
-        return text ? text.trim() : 'BOS';
+        return text ? text.trim() : 'BOŞ';
     } catch (err) {
         console.error('[STT Hatası]:', err.message);
-        return 'BOS';
+        return 'BOŞ';
     }
 }
 
-// Google Search ile Akıllı Cevap Alma
+// Google Search veya Genel Bilgi ile Akıllı Cevap Alma
 async function askMahmutAI(question, speakerName) {
     try {
         const prompt = `Sen "Mahmut"sun. Discord ses kanalındaki arkadaş ortamında takılan samimi, esprili ve oyunlar konusunda bilgili bir arkadaşsın.
-Arkadaşın ${speakerName} sana sesli olarak şunu sordu: "${question}".
+Arkadaşın ${speakerName} sana şunu sordu: "${question}".
 Cevabını oluştururken:
-1. Google Arama'yı kullanarak en güncel bilgileri (özellikle League of Legends yama notları, counter taktikleri, eşya buildleri, rünler vb.) kontrol et.
+1. Eğer League of Legends veya oyun taktiği soruluyorsa güncel yama bilgilerini, counter eşleşmelerini ve eşya/rün dizilimlerini aktar.
 2. İki bölümden oluşan bir yanıt hazırla:
 SES: Ses kanalında seslendirilecek 2-3 cümlelik çok samimi, doğal, esprili ve akıcı özet. Markdown işaretleri (yıldız, diyez vb.) ASLA KULLANMA.
-CHAT: Discord metin kanalına atılacak detaylı build, rün, yama ve taktik bilgisi (madde işaretleri ve detay içerebilir).
+CHAT: Discord metin kanalına atılacak detaylı build, rün ve taktik bilgisi (madde işaretleri ve detay içerebilir).
 
 Format tam olarak şöyle olsun:
 [SES]
@@ -170,10 +182,23 @@ seslendirilecek metin
 [CHAT]
 chatte paylaşılacak detaylı metin`;
 
-        const response = await callGeminiAPI({
-            contents: [{ parts: [{ text: prompt }] }],
-            tools: [{ google_search: {} }]
-        });
+        let response = null;
+        // 1. Önce Google Search ile dene
+        try {
+            response = await callGeminiAPI({
+                contents: [{ parts: [{ text: prompt }] }],
+                tools: [{ google_search: {} }]
+            });
+        } catch (searchErr) {
+            console.warn('[Google Search Kotası]: Normal sorguya geçiliyor...');
+        }
+
+        // 2. Arama kotası bittiyse veya arama olmadan
+        if (!response) {
+            response = await callGeminiAPI({
+                contents: [{ parts: [{ text: prompt }] }]
+            });
+        }
 
         if (!response) return null;
 
@@ -388,21 +413,22 @@ async function connectToVoice() {
 
         // --- KULLANICI SESLERİNİ DİNLEME ---
         const receiver = connection.receiver;
+        const userCooldowns = new Map();
 
         receiver.speaking.on('start', (userId) => {
             if (isBotSpeaking) return; // Mahmut konuşurken dinleme
             if (activeUsers.has(userId)) return;
 
-            const member = guild.members.cache.get(userId);
-            const speakerName = member?.displayName || member?.user?.username || 'Biri';
-            console.log(`[Mikrofon Algılandı] ${speakerName} (${userId}) konuşmaya başladı...`);
+            // Arka arkaya gelen ses parçacıklarını filtrele (kullanıcı bazlı 2.5 sn cooldown)
+            const lastTime = userCooldowns.get(userId) || 0;
+            if (Date.now() - lastTime < 2500) return;
 
             activeUsers.add(userId);
 
             const opusStream = receiver.subscribe(userId, {
                 end: {
                     behavior: EndBehaviorType.AfterSilence,
-                    duration: 700 // 700ms sessizlik olunca konuşmanın bittiğini anlar
+                    duration: 1000 // 1 saniye sessizlik olunca konuşmanın bittiğini anlar
                 }
             });
 
@@ -421,15 +447,18 @@ async function connectToVoice() {
 
             opusDecoder.on('end', async () => {
                 activeUsers.delete(userId);
+                userCooldowns.set(userId, Date.now());
                 if (isBotSpeaking) return;
 
                 const pcmBuffer = Buffer.concat(pcmChunks);
-                // Çok kısa tık seslerini (0.15 saniyeden kısa) filtrele
-                // 48000Hz * 2 kanal * 2 bayt * 0.15s = 28800 bayt
-                if (pcmBuffer.length < 28800) {
-                    console.log(`[Ses Çok Kısa] ${speakerName} konuşması atlandı (Boyut: ${pcmBuffer.length} bayt)`);
+                // 0.8 saniyeden kısa arka plan seslerini/öksürükleri/tık seslerini atla!
+                // 48000Hz * 2 kanal * 2 bayt * 0.8s = 153600 bayt
+                if (pcmBuffer.length < 153600) {
                     return;
                 }
+
+                const member = guild.members.cache.get(userId);
+                const speakerName = member?.displayName || member?.user?.username || 'Biri';
 
                 console.log(`[Ses İletiliyor] ${speakerName} sesi Gemini'a gönderiliyor (${(pcmBuffer.length / 192000).toFixed(2)} sn)...`);
 
@@ -438,8 +467,8 @@ async function connectToVoice() {
 
                 console.log(`[Transkript Sonucu] ${speakerName}: "${transcript}"`);
 
-                if (!transcript || transcript === 'BOS') {
-                    console.log('[Transkript Boş] Ses çözülemedi veya arka plan gürültüsü.');
+                if (!transcript || transcript.toUpperCase() === 'BOŞ' || transcript.toUpperCase() === 'BOS') {
+                    console.log('[Transkript Boş] Konuşma algılanamadı.');
                     return;
                 }
 
@@ -491,14 +520,14 @@ async function connectToVoice() {
 }
 
 // -------------------------------------------------------------
-// 6. METİN KANALINDA EKRAN GÖRÜNTÜSÜ / FOTOĞRAF YORUMLAMA
+// 6. METİN KANALINDA EKRAN GÖRÜNTÜSÜ / FOTOĞRAF / SORU YORUMLAMA
 // -------------------------------------------------------------
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
     const lower = message.content.toLowerCase();
     const isMentioned = message.mentions.has(client.user);
-    const mentionsMahmut = lower.includes('mahmut');
+    const mentionsMahmut = lower.includes('mahmut') || lower.startsWith('!mahmut');
 
     // Kanala resim atıldığında ve Mahmut dendiğinde
     if (message.attachments.size > 0 && (mentionsMahmut || isMentioned)) {
@@ -521,13 +550,24 @@ client.on('messageCreate', async (message) => {
 
     // Normal metin sorusu geldiğinde
     if (mentionsMahmut || isMentioned) {
-        const cleanContent = message.content.replace(/<@!?[0-9]+>/g, '').trim();
-        if (!cleanContent) return;
+        const cleanContent = message.content
+            .replace(/<@!?[0-9]+>/g, '')
+            .replace(/^!mahmut/i, '')
+            .replace(/^mahmut/i, '')
+            .trim();
 
         const speakerName = message.member?.displayName || message.author.username;
+
+        if (!cleanContent) {
+            await message.reply(`Efendim ${speakerName}, dinliyorum kanka?`);
+            await speak(`Efendim ${speakerName}, dinliyorum kanka?`);
+            return;
+        }
+
+        const thinkingMsg = await message.reply('Düşünüyorum kanka...');
         const result = await askMahmutAI(cleanContent, speakerName);
         if (result) {
-            await message.reply(result.chatText || result.voiceText);
+            await thinkingMsg.edit(result.chatText || result.voiceText);
             if (result.voiceText) {
                 await speak(result.voiceText);
             }
